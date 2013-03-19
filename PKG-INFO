@@ -1,6 +1,6 @@
-Metadata-Version: 1.1
+Metadata-Version: 1.0
 Name: humbug
-Version: 0.1.3
+Version: 0.1.4
 Summary: Bindings for the Humbug message API
 Home-page: https://humbughq.com/dist/api/
 Author: Humbug, Inc.

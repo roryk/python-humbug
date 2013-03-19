@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # -*- coding: utf-8 -*-
 
 # Copyright © 2012 Humbug, Inc.
@@ -29,15 +28,16 @@ import urlparse
 import sys
 import os
 import optparse
+from distutils.version import LooseVersion
 
 from ConfigParser import SafeConfigParser
 
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 # Check that we have a recent enough version
 # Older versions don't provide the 'json' attribute on responses.
-assert(requests.__version__ >= '0.12.1')
+assert(LooseVersion(requests.__version__) >= LooseVersion('0.12.1'))
 # In newer versions, the 'json' attribute is a function, not a property
 requests_json_is_function = not isinstance(requests.Response.json, property)
 
@@ -83,8 +83,8 @@ class Client(object):
                 api_key = config.get("api", "key")
             if email is None:
                 email = config.get("api", "email")
-            if site is None:
-                site = config.get("api", "site", None)
+            if site is None and config.has_option("api", "site"):
+                site = config.get("api", "site")
 
         self.api_key = api_key
         self.email = email
