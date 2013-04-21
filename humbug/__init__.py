@@ -33,13 +33,13 @@ from distutils.version import LooseVersion
 from ConfigParser import SafeConfigParser
 
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 # Check that we have a recent enough version
 # Older versions don't provide the 'json' attribute on responses.
 assert(LooseVersion(requests.__version__) >= LooseVersion('0.12.1'))
 # In newer versions, the 'json' attribute is a function, not a property
-requests_json_is_function = not isinstance(requests.Response.json, property)
+requests_json_is_function = callable(requests.Response.json)
 
 API_VERSTRING = "/api/v1/"
 
@@ -69,7 +69,7 @@ def init_from_options(options):
 class Client(object):
     def __init__(self, email=None, api_key=None, config_file=None,
                  verbose=False, retry_on_errors=True,
-                 site=None, client="API"):
+                 site=None, client="API: Python"):
         if None in (api_key, email):
             if config_file is None:
                 config_file = os.path.join(os.environ["HOME"], ".humbugrc")
@@ -96,10 +96,8 @@ class Client(object):
         self.retry_on_errors = retry_on_errors
         self.client_name = client
 
-    def do_api_query(self, orig_request, url, longpolling = False):
+    def do_api_query(self, orig_request, url, method="POST", longpolling = False):
         request = {}
-        request["email"] = self.email
-        request["api-key"] = self.api_key
         request["client"] = self.client_name
 
         for (key, val) in orig_request.iteritems():
@@ -139,9 +137,18 @@ class Client(object):
 
         while True:
             try:
-                res = requests.post(urlparse.urljoin(self.base_url, url),
-                                    data=query_state["request"],
-                                    verify=True, timeout=55)
+                if method == "GET":
+                    kwarg = "params"
+                else:
+                    kwarg = "data"
+                kwargs = {kwarg: query_state["request"]}
+                res = requests.request(
+                        method,
+                        urlparse.urljoin(self.base_url, url),
+                        auth=requests.auth.HTTPBasicAuth(self.email,
+                                                         self.api_key),
+                        verify=True, timeout=90,
+                        **kwargs)
 
                 # On 50x errors, try again after a short sleep
                 if str(res.status_code).startswith('5'):
@@ -186,50 +193,83 @@ class Client(object):
                     "status_code": res.status_code}
 
     @classmethod
-    def _register(cls, name, url=None, make_request=(lambda request={}: request), **query_kwargs):
+    def _register(cls, name, url=None, make_request=(lambda request={}: request),
+            method="POST", **query_kwargs):
         if url is None:
             url = name
         def call(self, *args, **kwargs):
             request = make_request(*args, **kwargs)
-            return self.do_api_query(request, API_VERSTRING + url, **query_kwargs)
+            return self.do_api_query(request, API_VERSTRING + url, method=method, **query_kwargs)
         call.func_name = name
         setattr(cls, name, call)
 
-    def call_on_each_message(self, callback, options = {}):
-        max_message_id = None
+    def call_on_each_event(self, callback, event_types=None):
+        def do_register():
+            while True:
+                if event_types is None:
+                    res = self.register()
+                else:
+                    res = self.register(event_types=event_types)
+
+                if 'error' in res.get('result'):
+                    if self.verbose:
+                        print "Server returned error:\n%s" % res['msg']
+                    time.sleep(1)
+                else:
+                    return (res['queue_id'], res['last_event_id'])
+
+        queue_id = None
         while True:
-            if max_message_id is not None:
-                options["last"] = str(max_message_id)
-            elif options.get('last') is not None:
-                options.pop('last')
-            res = self.get_messages(options)
+            if queue_id is None:
+                (queue_id, last_event_id) = do_register()
+
+            res = self.get_events(queue_id=queue_id, last_event_id=last_event_id)
             if 'error' in res.get('result'):
                 if res["result"] == "http-error":
                     if self.verbose:
-                        print "HTTP error fetching messages -- probably a server restart"
+                        print "HTTP error fetching events -- probably a server restart"
                 elif res["result"] == "connection-error":
                     if self.verbose:
-                        print "Connection error fetching messages -- probably server is temporarily down?"
+                        print "Connection error fetching events -- probably server is temporarily down?"
                 else:
                     if self.verbose:
                         print "Server returned error:\n%s" % res["msg"]
-                    if res["msg"].startswith("last value of") and \
-                            "too old!  Minimum valid is" in res["msg"]:
-                        # We may have missed some messages while the
-                        # network was down or something, but there's
-                        # not really anything we can do about it other
-                        # than resuming getting new ones.
+                    if res["msg"].startswith("Bad event queue id:"):
+                        # Our event queue went away, probably because
+                        # we were asleep or the server restarted
+                        # abnormally.  We may have missed some
+                        # events while the network was down or
+                        # something, but there's not really anything
+                        # we can do about it other than resuming
+                        # getting new ones.
                         #
-                        # Reset max_message_id to just subscribe to new messages
-                        max_message_id = None
+                        # Reset queue_id to register a new event queue.
+                        queue_id = None
                 # TODO: Make this back off once it's more reliable
                 time.sleep(1)
                 continue
-            for message in sorted(res['messages'], key=lambda x: int(x["id"])):
-                max_message_id = max(max_message_id, int(message["id"]))
-                callback(message)
+
+            for event in res['events']:
+                last_event_id = max(last_event_id, int(event['id']))
+                callback(event)
+
+    def call_on_each_message(self, callback):
+        def event_callback(event):
+            if event['type'] == 'message':
+                callback(event['message'])
+
+        self.call_on_each_event(event_callback, ['message'])
 
 def _mk_subs(streams):
     return {'subscriptions': streams}
 
-Client._register('send_message', make_request=(lambda request: request))
+def _mk_rm_subs(streams):
+    return {'delete': streams}
+
+def _mk_events(event_types=None):
+    if event_types is None:
+        return dict()
+    return dict(event_types=event_types)
+
+Client._register('send_message', url='messages', make_request=(lambda request: request))
+Client._register('get_messages', method='GET', url='messages/latest', longpolling=True)
