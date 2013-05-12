@@ -31,6 +31,7 @@ import optparse
 from distutils.version import LooseVersion
 
 from ConfigParser import SafeConfigParser
+import logging
 
 
 __version__ = "0.1.6"
@@ -273,3 +274,25 @@ def _mk_events(event_types=None):
 
 Client._register('send_message', url='messages', make_request=(lambda request: request))
 Client._register('get_messages', method='GET', url='messages/latest', longpolling=True)
+
+
+class HumbugStream(object):
+    """
+    A Humbug stream-like object
+    """
+
+    def __init__(self, email, type, to, subject):
+        self.client = Client(email=email)
+        self.type = type
+        self.to = to
+        self.subject = subject
+
+    def write(self, content):
+        message = {"type": self.type,
+                   "to": self.to,
+                   "subject": self.subject,
+                   "content": content}
+        self.client.send_message(message)
+
+    def flush(self):
+        pass
